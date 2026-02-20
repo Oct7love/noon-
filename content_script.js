@@ -31,6 +31,9 @@
   const THROTTLE_MS = 150;
   let lastApplyWarehouseTime = 0;
   let pollActive = false; // API 轮询是否已激活（已捕获 capacity 请求参数）
+  let pollCount = 0; // API 轮询次数
+  let pollLastLogTime = 0; // 上次打印轮询摘要的时间
+  const POLL_LOG_INTERVAL = 10000; // 每 10 秒打印一次轮询摘要
   const PREFERRED_WAREHOUSE_REAPPLY_MS = 4000;
 
   // ── Noon FBN 专用售罄关键词 ──────────────────────────────────────
@@ -1164,31 +1167,37 @@
     if (!armed || Date.now() < cooldownUntil) return;
 
     if (d.subtype === "capacity") {
-      if (!d.isSoldOut && d.slotCount > 0) {
-        // 暂停轮询
-        window.postMessage({ type: "SS_SET_POLL", interval: cfg.pollInterval || 500, paused: true }, "*");
-        log("info", `⚡ [CAPACITY] 检测到 ${d.slotCount} 个可用 slot！`);
+      pollCount++;
+      const now = Date.now();
 
-        // 判断页面是否已渲染出时段卡片（页面自己的 API 调用可能也返回了数据）
+      if (!d.isSoldOut && d.slotCount > 0) {
+        // ═══ 发现仓位！═══
+        window.postMessage({ type: "SS_SET_POLL", interval: cfg.pollInterval || 500, paused: true }, "*");
+        log("info", `⚡⚡⚡ [第${pollCount}次轮询] 检测到 ${d.slotCount} 个可用 slot！！！`);
+
         const timeCards = detectTimeSlotCards();
         if (timeCards.length > 0) {
-          // 页面已有时段卡片（比如页面自己的 API 也刚返回了），直接抢
           capacityLock = false;
           log("info", `⚡ 页面已有 ${timeCards.length} 个时段卡片，直接零延迟抢位！`);
           currentState = "AVAILABLE";
-          lastTransition = Date.now();
+          lastTransition = now;
           onSlotsAvailable(true);
         } else {
-          // 页面 UI 没更新（轮询是影子请求）→ 保存标记，刷新页面一次
           log("info", "⚡ 页面 UI 未更新，保存紧急标记并刷新页面…");
-          chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => {
+          chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: now }, () => {
             location.reload();
           });
         }
       } else {
+        // ═══ 无仓位，定期打印摘要 ═══
         capacityLock = true;
         if (currentState !== "SOLD_OUT") {
-          log("info", "[CAPACITY] 无仓位，轮询监测中…");
+          log("info", `[轮询] 第${pollCount}次检测 — 无仓位，持续监测中（${cfg.pollInterval || 500}ms/次）`);
+          pollLastLogTime = now;
+        } else if (now - pollLastLogTime >= POLL_LOG_INTERVAL) {
+          const elapsed = Math.round((now - pollLastLogTime) / 1000);
+          log("info", `[轮询] 已检测 ${pollCount} 次 | 最近 ${elapsed}s 均无仓位 | 间隔 ${cfg.pollInterval || 500}ms`);
+          pollLastLogTime = now;
         }
         currentState = "SOLD_OUT";
         candidates = [];

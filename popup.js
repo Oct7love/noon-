@@ -34,6 +34,8 @@ const togHighlight      = $("#togHighlight");
 const togTitle          = $("#togTitle");
 const togSound          = $("#togSound");
 const notifMode         = $("#notifMode");
+const pollIntervalEl    = $("#pollInterval");
+const pollIntervalVal   = $("#pollIntervalVal");
 const debounceSlider    = $("#debounceSlider");
 const debounceVal       = $("#debounceVal");
 const btnForceCheck     = $("#btnForceCheck");
@@ -87,6 +89,8 @@ chrome.storage.local.get(null, (cfg) => {
   togTitle.checked          = cfg.titleFlash !== false;
   togSound.checked          = !!cfg.soundEnabled;
   notifMode.value           = cfg.notifMode || "toast";
+  pollIntervalEl.value      = cfg.pollInterval || 2000;
+  pollIntervalVal.textContent = ((cfg.pollInterval || 2000) / 1000).toFixed(1) + "s";
   debounceSlider.value      = cfg.debounceMs || 100;
   debounceVal.textContent   = (cfg.debounceMs || 100) + "ms";
   togSchedule.checked       = !!cfg.scheduleEnabled;
@@ -547,6 +551,13 @@ notifMode.addEventListener("change", () => {
   const val = notifMode.value;
   chrome.storage.local.set({ notifMode: val, desktopNotif: val === "desktop" });
   sendToContent({ type: "CONFIG_UPDATED", cfg: { notifMode: val } });
+});
+
+pollIntervalEl.addEventListener("input", () => {
+  const val = parseInt(pollIntervalEl.value, 10);
+  pollIntervalVal.textContent = (val / 1000).toFixed(1) + "s";
+  chrome.storage.local.set({ pollInterval: val });
+  sendToContent({ type: "CONFIG_UPDATED", cfg: { pollInterval: val } });
 });
 
 debounceSlider.addEventListener("input", () => {

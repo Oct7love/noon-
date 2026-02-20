@@ -292,6 +292,11 @@
   <div class="section">
     <div class="section-title">检测参数</div>
     <div class="slider-row">
+      <label>API 轮询</label>
+      <input type="range" id="pollInterval" min="500" max="10000" step="500" value="2000">
+      <span class="val" id="pollIntervalVal">2.0s</span>
+    </div>
+    <div class="slider-row">
       <label>防抖</label>
       <input type="range" id="debounceSlider" min="50" max="500" step="25" value="100">
       <span class="val" id="debounceVal">100ms</span>

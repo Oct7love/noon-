@@ -1000,6 +1000,7 @@
           clearHighlights();
           stopAutoRefresh();
         }
+        sendPollConfig();
         log("info", (armed ? "已启用" : "已暂停") + " 监控");
         break;
 
@@ -1035,6 +1036,7 @@
       case "CONFIG_UPDATED":
         Object.assign(cfg, msg.cfg);
         applyPreferredWarehouse();
+        sendPollConfig();
         break;
 
       case "REQUEST_STATE":
@@ -1114,24 +1116,40 @@
 
   // ── API 网络拦截响应（比 MutationObserver 更早感知）──────────────
 
+  // 向 injected.js 发送轮询配置
+  function sendPollConfig() {
+    const interval = cfg.pollInterval || 2000;
+    const paused = !armed || Date.now() < cooldownUntil;
+    window.postMessage({ type: "SS_SET_POLL", interval, paused }, "*");
+  }
+
   window.addEventListener("message", (e) => {
-    if (e.source !== window) return;
+    if (e.source !== window || !e.data) return;
+
+    // capacity 请求参数已捕获，启动轮询
+    if (e.data.type === "SS_POLL_READY") {
+      log("info", `🔄 capacity API 参数已捕获，启动轮询（${cfg.pollInterval || 2000}ms）`);
+      sendPollConfig();
+      return;
+    }
+
+    if (e.data.type !== "SS_API_RESPONSE") return;
     const d = e.data;
-    if (!d || d.type !== "SS_API_RESPONSE") return;
     if (!armed || Date.now() < cooldownUntil) return;
 
     if (d.subtype === "capacity") {
-      // 精确 capacity 端点响应 — 唯一可信的 slot 数据源
       if (!d.isSoldOut && d.slotCount > 0) {
         capacityLock = false;
+        // 发现仓位 → 暂停轮询，进入抢位流程
+        window.postMessage({ type: "SS_SET_POLL", interval: cfg.pollInterval || 2000, paused: true }, "*");
         log("info", `⚡ [CAPACITY] 检测到 ${d.slotCount} 个可用 slot → 立即抢位！`);
         currentState = "AVAILABLE";
         lastTransition = Date.now();
         onSlotsAvailable();
       } else {
-        capacityLock = true; // 锁定：禁止 DOM 检测误判为有仓位
+        capacityLock = true;
         if (currentState !== "SOLD_OUT") {
-          log("info", "[CAPACITY] 响应空数组 → 无仓位，持续监测…");
+          log("info", "[CAPACITY] 无仓位，轮询监测中…");
         }
         currentState = "SOLD_OUT";
         candidates = [];
@@ -1139,7 +1157,6 @@
         broadcastState();
       }
     }
-    // 通用 API 响应仅用于辅助检测，不直接触发抢位
   });
 
   // ── SPA 导航支持 ─────────────────────────────────────────────────

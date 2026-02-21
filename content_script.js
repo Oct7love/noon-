@@ -303,6 +303,124 @@
     return true;
   }
 
+  /**
+   * 重选仓库：打开下拉 → 选别的仓库 → 再选回目标仓库
+   * 目的：强制页面 React 重新调 capacity API 并渲染
+   * 比 location.reload() 快 5-7 秒
+   */
+  function triggerWarehouseReselect() {
+    const wh = (cfg.preferredWarehouse || "").trim().toUpperCase();
+    if (!wh) {
+      log("warn", "重选仓库: 未设首选仓库，回退到 reload");
+      chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
+      return;
+    }
+
+    const clickTarget = findDropdownTrigger();
+    if (!clickTarget) {
+      log("warn", "重选仓库: 未找到下拉触发器，回退到 reload");
+      chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
+      return;
+    }
+
+    log("info", "⚡ 步骤1: 打开下拉框，准备切换仓库…");
+    clickTarget.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    clickTarget.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    clickTarget.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    const searchInput = clickTarget.closest(".ant-select")?.querySelector('input[type="search"], input[role="combobox"]');
+    if (searchInput) searchInput.focus();
+
+    // 先选一个别的仓库（触发 React 状态变化），然后再选回目标仓库
+    let reselectAttempt = 0;
+    const doReselect = () => {
+      reselectAttempt++;
+      const options = document.querySelectorAll(
+        '.ant-select-item-option, .ant-select-item, [role="option"]'
+      );
+
+      // 找一个不是目标仓库的选项先点一下
+      let otherOption = null;
+      let targetOption = null;
+      for (const opt of options) {
+        const txt = (opt.textContent || "").trim().toUpperCase();
+        if (txt.length > 50 || !txt) continue;
+        const rect = opt.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        if (txt.includes(wh)) {
+          targetOption = opt;
+        } else if (!otherOption) {
+          otherOption = opt;
+        }
+      }
+
+      if (!otherOption || !targetOption) {
+        if (reselectAttempt < 10) {
+          setTimeout(doReselect, 300);
+        } else {
+          log("warn", "重选仓库: 选项未找到，回退到 reload");
+          document.body.click();
+          chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
+        }
+        return;
+      }
+
+      // 先点别的仓库
+      log("info", `⚡ 步骤2: 临时切换到 "${(otherOption.textContent || "").trim()}"…`);
+      otherOption.click();
+
+      // 等 React 更新后，再打开下拉选回目标仓库
+      setTimeout(() => {
+        log("info", "⚡ 步骤3: 重新打开下拉框，选回目标仓库…");
+        const trigger2 = findDropdownTrigger();
+        if (trigger2) {
+          trigger2.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+          trigger2.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+          trigger2.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        }
+
+        setTimeout(() => {
+          const options2 = document.querySelectorAll(
+            '.ant-select-item-option, .ant-select-item, [role="option"]'
+          );
+          for (const opt of options2) {
+            const txt = (opt.textContent || "").trim().toUpperCase();
+            if (txt.includes(wh)) {
+              const rect = opt.getBoundingClientRect();
+              if (rect.width === 0 || rect.height === 0) continue;
+              opt.click();
+              log("info", `⚡ 步骤4: 已选回 ${wh}，等待页面刷新数据…`);
+              // 页面会自己调 capacity API → injected.js 拦截 → 如果有 slot 会再次触发
+              // 同时 DOM 也会更新 → MutationObserver 检测到时段卡片 → 自动抢
+              waitForTimeSlotsAfterReselect(0);
+              return;
+            }
+          }
+          log("warn", "重选仓库: 选回失败，回退到 reload");
+          chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
+        }, 500);
+      }, 800);
+    };
+
+    setTimeout(doReselect, 500);
+  }
+
+  /** 重选仓库后等待时段卡片出现并抢位 */
+  function waitForTimeSlotsAfterReselect(attempt) {
+    if (!armed || !autoClickEnabled) return;
+    const found = detectTimeSlotCards();
+    if (found.length > 0) {
+      log("info", `⚡ 重选后检测到 ${found.length} 个时段卡片，开始抢位！`);
+      currentState = "AVAILABLE";
+      lastTransition = Date.now();
+      onSlotsAvailable(true);
+    } else if (attempt < 20) {
+      setTimeout(() => waitForTimeSlotsAfterReselect(attempt + 1), 500);
+    } else {
+      log("warn", "重选仓库后 10s 未出现时段卡片，回退到 reload");
+      chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
+    }
+  }
+
   /** 找到 Ship To 区块里下拉框当前显示的文字（Ant Design Select） */
   function findShipToCurrentValue() {
     const block = findShipToBlock();
@@ -1162,6 +1280,22 @@
       return;
     }
 
+    // 自动捕获 booking/confirm API（方案B 学习）
+    if (e.data.type === "SS_BOOKING_API_CAPTURED") {
+      const d = e.data;
+      log("info", `🎯 [自动抓包] 捕获到预约 API: ${d.method} ${d.pathname}`);
+      chrome.storage.local.set({
+        bookingApi: {
+          url: d.url,
+          method: d.method,
+          body: d.body,
+          headers: d.headers,
+          capturedAt: Date.now(),
+        },
+      });
+      return;
+    }
+
     // 轮询退避通知
     if (e.data.type === "SS_POLL_BACKOFF") {
       log("warn", `[轮询] ${e.data.reason} → 间隔调整为 ${e.data.interval}ms（退避等级 ${e.data.level}）`);
@@ -1197,10 +1331,10 @@
           lastTransition = now;
           onSlotsAvailable(true);
         } else {
-          log("info", "⚡ 页面 UI 未更新，保存紧急标记并刷新页面…");
-          chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: now }, () => {
-            location.reload();
-          });
+          // 页面 UI 没更新 → 重选仓库触发页面自己刷新（比 reload 快 5-7 秒）
+          capacityLock = false;
+          log("info", "⚡ 页面 UI 未更新，重选仓库触发刷新…");
+          triggerWarehouseReselect();
         }
       } else {
         // ═══ 无仓位，定期打印摘要 ═══

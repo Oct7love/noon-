@@ -9,6 +9,7 @@
   "use strict";
 
   const CAPACITY_RE = /\/inbound-scheduler\/.*\/capacity/i;
+  const BOOKING_RE = /\/inbound-scheduler\/.*(book|confirm|reserve|schedule|slot)/i;
   const SLOT_URL_RE = /slot|schedule|shipment|booking|availability|inbound|delivery/i;
   const EXCLUDE_RE = /partner_asn_details|partner_warehouse|warehouse_list|countries|whoami|navigation|cluster|collect/i;
 
@@ -173,6 +174,37 @@
     window.postMessage({ type: "SS_POLL_READY" }, "*");
   }
 
+  // ── 自动捕获 booking/confirm API（方案B 自动学习）─────────────────
+
+  function captureBookingReq(url, init, responseData) {
+    let pathname;
+    try { pathname = new URL(url, location.href).pathname; } catch (_) { pathname = url; }
+    if (!BOOKING_RE.test(pathname)) return;
+    if (CAPACITY_RE.test(pathname)) return; // 排除 capacity
+
+    const method = (init?.method || "POST").toUpperCase();
+    if (method !== "POST" && method !== "PUT") return;
+
+    const headers = {};
+    if (init?.headers) {
+      if (init.headers instanceof Headers) {
+        init.headers.forEach((v, k) => { headers[k] = v; });
+      } else if (typeof init.headers === "object") {
+        Object.assign(headers, init.headers);
+      }
+    }
+
+    window.postMessage({
+      type: "SS_BOOKING_API_CAPTURED",
+      url,
+      method,
+      body: init?.body || null,
+      headers,
+      pathname,
+      response: responseData,
+    }, "*");
+  }
+
   // ── 监听 content_script 配置 ─────────────────────────────────────
 
   window.addEventListener("message", (e) => {
@@ -217,7 +249,11 @@
       if (shouldIntercept(url)) {
         const ct = result.headers.get("content-type") || "";
         if (ct.includes("json")) {
-          result.clone().json().then((data) => analyzeResponse(url, data)).catch(() => {});
+          result.clone().json().then((data) => {
+            analyzeResponse(url, data);
+            // 自动捕获 booking/confirm API
+            try { captureBookingReq(url, args[1], data); } catch (_) {}
+          }).catch(() => {});
         }
       }
     } catch (_) {}
